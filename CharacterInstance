@@ -1,0 +1,102 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Zenject;
+using UnityEngine.EventSystems;
+
+public class CharacterInstance : PersoneBase
+{
+     public bool characterWithoutRegistering = false;
+    public override Dictionary<string, ItemInventory> BagItems
+    { 
+        get => m_InventoryBag.Items_UniqIdItemPair;
+    }
+    private void Awake()
+    {
+        m_InventoryBag = GetComponent<InventoryBag>();
+        m_person_view = GetComponent<PersonView>();
+        collider_caster = GetComponent<Collider>();
+        m_nav_mesh_move_controller = GetComponent<NavMeshMovement>();
+        m_nav_mesh_move_controller.SetFollowNavmeshAgent = false;
+    }
+    void Start()
+    {
+        RequestInitializePerson();
+    }
+    void Update()
+    {
+        if(m_control_owner == ControlledBy.AI && m_scene_controller.IsSceneInited)
+        CheckAggression();
+    }
+    public override void SetDestinationToMove(Vector3 position, Action on_finish)
+    {
+        if (m_nav_mesh_move_controller)
+        {
+            StandUp();
+            m_nav_mesh_move_controller.SetDestinationPosition(position, on_finish);
+        }
+    }
+
+    public float StoppingDistance
+    {
+        get => m_nav_mesh_move_controller.agent.stoppingDistance;
+        set
+        {
+            m_nav_mesh_move_controller.agent.stoppingDistance = value;
+        }
+    }
+
+    public override void OnGroundClick(BaseEventData data)
+    {
+        if (m_nav_mesh_move_controller)
+        {
+            StandUp();
+            m_nav_mesh_move_controller.OnGroundClick(data);
+        }
+    }
+
+    Coroutine m_companionsWalkRoutine;
+    public void StartFollowing(Vector3 position, CharacterInstance following_target)
+    {
+        
+        StaticHelper.RestartCoroutine(ref m_companionsWalkRoutine, this, FollowRoutine(position, following_target));
+    }
+    public IEnumerator FollowRoutine(Vector3 position, CharacterInstance following_target)
+    {
+        while (Vector3.Distance(Position, following_target.Position) < 5)
+        {
+            if (IsPersonInBattle)
+                yield break;
+            yield return null;
+        }
+        
+        Vector3 direction = position - Position;
+        direction.Normalize();
+        Vector3 target_position = Position + (0.5f * direction);
+        SetDestinationToMove(position, null);
+    }
+
+    public override void OnChangeMode(GlobalEnum.SceneGamePlayeMode mode)
+    {
+        switch (mode)
+        {
+            case GlobalEnum.SceneGamePlayeMode.peaceful_mode:
+                //m_nav_mesh_move_controller.agent.obstacleAvoidanceType = UnityEngine.AI.ObstacleAvoidanceType.HighQualityObstacleAvoidance;
+                break;
+            case GlobalEnum.SceneGamePlayeMode.battle_mode:
+                //m_nav_mesh_move_controller.agent.obstacleAvoidanceType = UnityEngine.AI.ObstacleAvoidanceType.NoObstacleAvoidance;
+                break;
+        }
+    }
+
+    public override void SetRateMovement(NavMeshMovement.RateMovemnt rateMovement)
+    {
+        m_nav_mesh_move_controller.SetRateMovement(rateMovement);
+    }
+
+    public override void StopMovement()
+    {
+        m_nav_mesh_move_controller.StopCurrentMovement();
+    }
+}
