@@ -1,0 +1,828 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Zenject;
+using System;
+using UnityEngine.EventSystems;
+
+public abstract class PersoneBase : SceneObject, IGetDamage
+{
+    public enum ControlledBy {player,AI}
+    public enum CurrentActionState {idle, move, reloadWeapon,attacking,gettingSit,gettingAmbush,changingWeapon,takingObject}
+
+    [Inject] protected BattleSystemController m_battle_system_controller;
+    [Inject] protected TeamsHandler m_teamsHandler;
+
+    public string m_personalName = "Hannibal";
+    public int m_experienceReward;
+    [SerializeField] internal IDEnum.CharactersID Heading_ID;
+
+    public ControlledBy m_control_owner;
+
+    [Header("DATA")]
+    [SerializeField] protected ModelMainStats m_stats_data = new ModelMainStats();
+    protected ModelBattleMember m_base_battle_data = new ModelBattleMember();
+
+    [SerializeField] ModelVariablesCharacter m_variables = new ModelVariablesCharacter();
+
+    public GlobalEnum.TeamID m_my_team_ID;
+    public bool m_PersonalConduct = false;
+    public List<GlobalEnum.TeamID> m_aliesTeams_IDs;
+    public GlobalEnum.TypeOfAggressionPerson m_aggression;
+    public float m_radiusAggression = 5;
+    public int m_radiusInTilesAlertAlies = 20;
+    public TileEnvironment m_MyCurrentTileOnGrid;
+    public Collider collider_caster;
+    public DeadBody m_deadBody;
+
+    public GlobalEnum.PersonStatus m_status;
+    public CurrentActionState m_currentStateAction;
+    public MemberCurrentBattleData m_currentBattleData = new MemberCurrentBattleData();
+
+    internal HP_BarView m_hp_bar;
+    internal int m_currentNumberGroupTeams;
+
+    private bool isPersonInSittingMode;
+    private bool isPersonInCriticalStrikeMode;
+    private bool isPersonInAmbushMode;
+    private Coroutine m_currentActionRoutine = null;
+
+    protected InventoryBag m_InventoryBag;
+    protected NavMeshMovement m_nav_mesh_move_controller;
+    protected PersonView m_person_view;
+
+    private bool isPersonStand_at_Position;
+    private bool is_person_ready_fight;
+    private bool is_person_in_battle;
+
+
+    public event Action<int, BattleSystemController.TypeDamage> onGetDamage;
+    public event Action<PersoneBase> onDeath;
+    public event Action<float> onChangeAP;
+    public event Action<int,int> onChangeHP;
+    public event Action onWeaponChanged;
+    public event Action onReloadWeapon;
+    public event Action onTakingSit;
+    public event Action onCriticalStrikeMode;
+    public event Action onAmbush;
+    public event Action onStandUp;
+    public event Action<PersoneBase,PersoneBase> onAmbushTriggered;
+    public event Action<bool> onJoiningTheBattle;
+    public event Action<bool> onInit;
+    public event Action<float> m_onMove;
+    public Coroutine CurrentActionRoutine
+    {
+        get
+        {
+            return m_currentActionRoutine;
+        }
+        set
+        {
+            //Debug.Log($"{m_uniq_id} {m_currentActionRoutine != null} SET ACTION ROUTINE");
+            if (m_currentActionRoutine != null)
+                StopCoroutine(m_currentActionRoutine);
+            m_currentActionRoutine = value;
+        }
+    }
+
+    public ModelBattleMember DataPerson
+    {
+        get => m_base_battle_data;
+    }
+    public WeaponsParametres CurrentWeaponData
+    {
+        get => m_InventoryBag.MainWeapon.m_data;
+    }
+    public ModelMainStats StatsData
+    {
+        get => m_stats_data;
+        set => m_stats_data = value;
+    }
+    public ref ModelMainStats GetRefStats()
+    {
+      return ref m_stats_data;
+    }
+    public ModelVariablesCharacter Variables
+    {
+        get => m_variables;
+        set => m_variables = value;
+    }
+    public float current_AP
+    {
+        get => m_variables.m_current_AP;
+        set { m_variables.m_current_AP = value; onChangeAP?.Invoke(value); }
+    }
+    public int current_HP
+    {
+        get => m_variables.m_current_hp;
+        set
+        {
+            m_variables.m_current_hp = value;
+            onChangeHP?.Invoke(value, m_base_battle_data.MaxHP);
+        }
+    }
+    public bool IsPersonReadyForFight 
+    {
+        get
+        {
+            if (m_MyCurrentTileOnGrid == null)
+                return false;
+           return is_person_ready_fight;
+        }
+        set 
+        {
+            is_person_ready_fight = value;
+        } 
+    }
+
+    public bool IsPersonStandAtPosition
+    {
+        get => isPersonStand_at_Position;
+        set
+        {
+            isPersonStand_at_Position = value;
+        }
+    }
+
+    public bool IsPersonInBattle
+    {
+        get => is_person_in_battle;
+        set
+        {
+            is_person_in_battle = value;
+            onJoiningTheBattle?.Invoke(value);
+        }
+    }
+    public WeaponItem MainWeaponItem
+    {
+        get => m_InventoryBag.MainWeapon;
+        set
+        {
+            onWeaponChanged?.Invoke();
+            m_InventoryBag.MainWeapon = value;
+        }
+    }
+    public WeaponItem SecondaryWeapon
+    {
+        get => m_InventoryBag.SecondaryWeapon;
+        set => m_InventoryBag.SecondaryWeapon = value;
+    }
+    public GlobalEnum.PersonStatus StatusPerson
+    {
+        get => m_status;
+        set
+        {
+            switch (value)
+            {
+                case GlobalEnum.PersonStatus.alive:
+                    m_status = value;
+                    break;
+                case GlobalEnum.PersonStatus.dead:
+                    OnDeath();
+                    m_status = value;
+                    break;
+                case GlobalEnum.PersonStatus.deadAtLoad:
+                    OnDeath(true);
+                    m_status = GlobalEnum.PersonStatus.dead;
+                    break;
+            }
+        }
+    }
+
+    public InventoryBag InventoryBag
+    {
+        get => m_InventoryBag;
+    }
+
+    public bool FollowNavmeshAgent
+    {
+        get => m_nav_mesh_move_controller.SetFollowNavmeshAgent;
+        set { m_nav_mesh_move_controller.SetFollowNavmeshAgent = value; }
+    }
+
+    public bool CheckReadyForFight()
+    {
+        if (IsPersonStandAtPosition)
+        {
+            IsPersonReadyForFight = true;
+        }
+        else
+        {
+            IsPersonReadyForFight = false;
+        }
+        return IsPersonReadyForFight;
+    }
+    internal bool IsPersonInSittingMode
+    {
+        get => isPersonInSittingMode;
+        set
+        {
+            isPersonInSittingMode = value;
+            if(!value)
+                m_scene_controller.ReleaseFollowingHud(transform, GlobalEnum.TypesFollowingHuds.activateTakeSitIcon);
+            else m_scene_controller.PlaceFlyingFollowHud<FlyingHudImage>(transform, GlobalEnum.TypesFollowingHuds.activateTakeSitIcon);
+        }
+    }
+    public bool PersonInAmbushMode
+    {
+        get => isPersonInAmbushMode;
+        set
+        {
+            if (!value)
+            {
+                if(m_currentActionRoutine == null)
+                TryGetCover();
+                m_scene_controller.ReleaseFollowingHud(transform, GlobalEnum.TypesFollowingHuds.activatedAmbushIcon);
+            }
+            else
+            {
+                m_scene_controller.PlaceFlyingFollowHud<FlyingHudImage>(transform, GlobalEnum.TypesFollowingHuds.activatedAmbushIcon);
+            }
+            isPersonInAmbushMode = value;
+        }
+    }
+
+    public override void Initialize()
+    {
+        m_InventoryBag.on_change_current_weapon += SetCurrentWeapon;
+      
+        if (!is_dataLoadedFromStorage)
+        {
+            CreateDefaultItems();
+            m_InventoryBag.SetDefaultWeapon();
+            //Debug.Log($"{MainWeaponItem.Heading_ID}{m_base_battle_data.m_damage} {Heading_ID}");
+            SetCurrentWeapon(MainWeaponItem);
+            current_HP = m_base_battle_data.MaxHP;
+            current_AP = m_base_battle_data.MaxAP;
+        }
+        else
+        {
+            SetCurrentWeapon(MainWeaponItem);
+            m_hp_bar.SetValueHP((float)current_HP, (float)m_base_battle_data.MaxHP);
+        }
+
+        m_base_battle_data.on_MaxHpChanged += (diff) => { current_HP += diff; };
+        m_base_battle_data.on_MaxApChanged += (diff) => { current_AP += diff; };
+
+        m_deadBody.Initialize(this);
+        m_deadBody.SwitchView(false);
+        //m_my_inventory_bag.SetDefaultWeapon();
+
+        m_person_view.InitView(this);
+        m_scene_controller.GetAgressionView(this, m_aggression, false);
+        m_nav_mesh_move_controller.m_On_idle_animation += m_person_view.OnIdle;
+        m_nav_mesh_move_controller.m_On_set_destination += m_person_view.OnSetDestination;
+        m_nav_mesh_move_controller.m_On_moving += m_person_view.OnMovement;
+        //m_battle_system_controller.m_on_battle_start += () => OnChangeMode(GlobalEnum.SceneGamePlayeMode.battle_mode);
+        //m_scene_controller.on_changeMode += OnChangeMode;
+        m_battle_system_controller.m_on_battle_start += RequestRegistrationBattleSystem;
+        // Debug.Log($"{current_HP} {gameObject.name}");
+        m_nav_mesh_move_controller.SetFollowNavmeshAgent = true;
+        StatusPerson = current_HP <= 0? GlobalEnum.PersonStatus.deadAtLoad : GlobalEnum.PersonStatus.alive;
+        onInit?.Invoke(true);
+    }
+
+    public void CreateDefaultItems()
+    {
+        m_InventoryBag.default_items.ForEach(x =>
+        {
+            GenerateItemRequestInfo info = new GenerateItemRequestInfo(x.id_head, x.count, x.type_item);
+            m_scene_controller.RequestToAddItems(info, InventoryBag);
+        }
+        );
+    }
+
+    public void SetCurrentWeapon(WeaponItem current_weapon)
+    {
+        UpdatePersonData();
+        WeaponView weapon_view = m_scene_controller.GetPrefabItem<WeaponView>(current_weapon.Heading_ID);
+        m_person_view.ChangeWeaponView(current_weapon, weapon_view);
+    }
+    public void UpdatePersonData()
+    {
+        BalanceCalculatings.CalculateModelBattleMember(m_stats_data, MainWeaponItem,ref m_base_battle_data);
+        m_stats_data.PointsLevelUp -= 0;
+    }
+    public virtual void CheckAggression()
+    {
+        if (m_scene_controller.Player == null || IsPersonInBattle || m_status == GlobalEnum.PersonStatus.dead || m_aggression == GlobalEnum.TypeOfAggressionPerson.calm)
+            return;
+
+        if (Vector3.Distance(m_scene_controller.Player.Position, Position) < m_radiusAggression
+            && m_my_team_ID != m_scene_controller.Player.m_my_team_ID
+            && m_scene_controller.Player.m_status!= GlobalEnum.PersonStatus.dead
+            && !m_aliesTeams_IDs.Contains(m_scene_controller.Player.m_my_team_ID))
+        {
+            m_scene_controller.RequestForStartingBattle(this, m_scene_controller.Player);
+        }
+    }
+    public void RequestRegistrationBattleSystem()
+    {
+        if (this == null)
+            return;
+        OpponentsBattleInfo info = m_battle_system_controller.GetCurrentOpponentsInfo;
+        // CHECKING FOR ENJOY TO BATTLE
+        if (StatusPerson!= GlobalEnum.PersonStatus.dead
+            && (info.m_list_potential_members.Contains(m_my_team_ID)) && !(m_aliesTeams_IDs.Contains(info.teamOpponent_1) && m_aliesTeams_IDs.Contains(info.teamOpponent_2))
+            && (Vector3.Distance(Position, info.centerConfict) < BattleCalculating.GetPathLengthByCountTiles(m_radiusInTilesAlertAlies)))
+        {
+            m_battle_system_controller.RegistrationMembersToBattle(this);
+        }
+    }
+    public void TryGetCover()
+    {
+        if (m_MyCurrentTileOnGrid == null)
+            return;
+
+        if (IsPersonAtCover)
+        {
+            GetCover();
+        }
+        else if(!IsPersonInSittingMode) { StandUp(); }
+    }
+
+    public bool IsPersonAtCover
+    {
+        get
+        {
+            if (m_MyCurrentTileOnGrid == null)
+                return false;
+            return m_MyCurrentTileOnGrid.m_CoversInfo.Count > 0;
+        }
+    }
+
+    public void GetCover()
+    {
+        m_person_view.OnGetCover();
+    }
+    public void StandUp()
+    {
+        IsPersonInSittingMode = false;
+        m_person_view.OnStandUp();
+        onStandUp?.Invoke();
+    }
+    public void PrepareAttack(Action onFinish)
+    {
+        if (!IsPersonInSittingMode || CurrentWeaponData.m_type_weapon == WeaponsParametres.TypeWeapon.melee)
+            m_person_view.OnPrepareAttack(onFinish);
+        else onFinish?.Invoke();
+    }
+
+    public void PrepareWeaponView(bool status)
+    {
+        m_person_view.WeaponShown = status;
+    }
+
+    public void Attack(int delayMilliseconds = 0)
+    {
+        m_person_view.OnAttack(delayMilliseconds);
+    }
+    public void TakeObjectLow(Action onFinish)
+    {
+        m_person_view.OnTakeObjectLow(onFinish);
+    }
+    public void Looting(Action onFinish = null)
+    {
+        m_person_view.LootingAnimation(onFinish);
+    }
+
+    private int countFriendlyFire = 0;
+    public void GetDamage(int damage, PersoneBase attacker,BattleSystemController.TypeDamage typeDamage, bool AllowingfriendlyFire = false)
+    {
+        onGetDamage?.Invoke(damage, typeDamage);
+        if(damage>0)
+        {
+            m_person_view.GetDamageView();
+            damage = Mathf.Clamp(damage, 0, current_HP);
+            current_HP -= damage;
+        }
+        if (current_HP == 0)
+        {
+            OnDeath();
+            onDeath?.Invoke(this);
+        }
+        if (IsPersonInBattle)
+            return;
+
+        if(attacker!=null && !AllowingfriendlyFire)
+        {
+            if (m_my_team_ID != attacker.m_my_team_ID)
+            {
+                m_teamsHandler.ChangeRelationships(this, attacker);
+                m_aggression = GlobalEnum.TypeOfAggressionPerson.aggressive;
+                m_scene_controller.RequestForStartingBattle(this, attacker);
+            }
+            else
+            {
+                countFriendlyFire++;
+                if (m_PersonalConduct && countFriendlyFire > 3)
+                {
+                    m_control_owner = ControlledBy.AI;
+                    m_teamsHandler.PutTobBetrayersTeam(this);
+                    m_aggression = GlobalEnum.TypeOfAggressionPerson.aggressive;
+                    m_scene_controller.RequestForStartingBattle(this, attacker);
+                }
+            }
+        }
+    }
+
+    public void SetAgressionView(GlobalEnum.TeamType typeTeam, bool statusAgression)
+    {
+        ColorsAgression colorsAgression = m_scene_controller.GetColorsAgression();
+        m_person_view.SetAgressionView(typeTeam, colorsAgression, statusAgression);
+    }
+
+    public void OnCharacterSelected()
+    {
+        m_person_view.SelectableFeetCircleAnimation();
+    }
+
+    public void SyncReloadWeapon(Action on_finish = null)
+    {
+        if(CheckFullMagazine(out bool isWithoutReload))
+        {
+            if(!isWithoutReload)
+                m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.flyingTextWeaponAlreadyRecharged.ToString());
+            return;
+        }
+
+        if (isWithoutReload)
+            return;
+
+        bool isEquipAllowToAttack = CheckEquipmentForAttack(out int ammo);
+
+        if (ammo == 0)
+        {
+            AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundError);
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.flyingTextNoAmmo.ToString());
+            return;
+        }
+        if(current_AP < CurrentWeaponData.m_reload_cost)
+        {
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.reasonCantAttack_AP.ToString());
+            return;
+        }
+
+        if (CurrentActionRoutine == null)
+        CurrentActionRoutine = StartCoroutine(ReloadWeaponRotuine(on_finish));
+        m_currentStateAction = CurrentActionState.reloadWeapon;
+        IEnumerator ReloadWeaponRotuine(Action on_finish)
+        {
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.flyingTextWeaponReloading.ToString());
+            bool isReloading = true;
+            m_person_view.ReloadWeaponView(() => isReloading = false);
+            while (isReloading)
+            {
+                yield return null;
+            }
+            current_AP -= DataPerson.m_current_weapon.m_data.m_reload_cost;
+            m_InventoryBag.ReloadWeapon(DataPerson.m_current_weapon);
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.flyingTextWeaponReloaded.ToString());
+            onReloadWeapon?.Invoke();
+            on_finish?.Invoke();
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+            
+        }
+    }
+
+    public void SyncTakeSitPosition(Action on_finish = null)
+    {
+        if (current_AP < BattleCalculating.m_costAp_PositionSit)
+        {
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.reasonCantAttack_AP.ToString());
+            return;
+        }
+        AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundAction);
+        if (CurrentActionRoutine == null)
+            CurrentActionRoutine = StartCoroutine(TakeSitPositionRotuine(on_finish));
+        m_currentStateAction = CurrentActionState.gettingSit;
+        IEnumerator TakeSitPositionRotuine(Action on_finish)
+        {
+            if(!IsPersonInSittingMode)
+            {
+                bool isTakingSit = true;
+                if (!IsPersonAtCover)
+                {
+                    m_person_view.OnGetCover(() => isTakingSit = false);
+                    while (isTakingSit)
+                    {
+                        yield return null;
+                    }
+                }
+         
+                IsPersonInSittingMode = true;
+            }
+            else
+            {
+                if (!IsPersonAtCover)
+                {
+                    StandUp();
+                }
+                else IsPersonInSittingMode = false;
+            }
+       
+            current_AP -= BattleCalculating.m_costAp_PositionSit;
+            onTakingSit?.Invoke();
+            on_finish?.Invoke();
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+        }
+    }
+
+    internal bool IsPersonInCriticalStrikeMode
+    {
+        get => isPersonInCriticalStrikeMode;
+        set
+        {
+            isPersonInCriticalStrikeMode = value;
+            onCriticalStrikeMode?.Invoke();
+            AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundAction);
+        }
+    }
+
+    public void SyncChangeWeapon(Action on_finish = null)
+    {
+        if (CurrentActionRoutine == null)
+            CurrentActionRoutine = StartCoroutine(ChangeWeaponRotuine(on_finish));
+        m_currentStateAction = CurrentActionState.changingWeapon;
+        AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundAction);
+        IEnumerator ChangeWeaponRotuine(Action on_finish)
+        {
+            // call animation
+            yield return new WaitForSeconds(0.1f);
+            m_InventoryBag.SwitchWeaponSlot();
+            on_finish?.Invoke();
+            onWeaponChanged?.Invoke();
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+        }
+    }
+
+    public void SyncSetDestinationToMove(Vector3 destination, Action on_finish, out bool isBegin)
+    {
+        if (CurrentActionRoutine == null)
+        {
+            CurrentActionRoutine = StartCoroutine(SetDestinationToMoveRoutine(destination, on_finish));
+            isBegin = true;
+            m_currentStateAction = CurrentActionState.move;
+        }
+        else
+        isBegin = false;
+
+        IEnumerator SetDestinationToMoveRoutine(Vector3 destination, Action on_finish)
+        {
+            if(IsPersonInSittingMode)
+            {
+                StandUp();
+                Debug.Log($"STAND UP BEFORE MOVE {m_uniq_id}");
+                current_AP -= BattleCalculating.m_costAp_PositionSit;
+            }
+            bool isProcessing = true;
+            SetDestinationToMove(destination, () =>
+            {
+                on_finish?.Invoke();
+                isProcessing = false;
+            });
+            while (isProcessing)
+            {
+                yield return null;
+            }
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+            yield return null;
+        }
+    }
+    Coroutine ambushRoutine = null;
+    public void SyncAmbush(Action on_finish = null)
+    {
+        if (ambushRoutine != null)
+            m_scene_controller.ReleaseFollowingHud(transform, GlobalEnum.TypesFollowingHuds.activatedAmbushIcon);
+
+        if (current_AP < DataPerson.m_require_AP_for_attack)
+        {
+            m_scene_controller.PlaceFlyingTextLoc(Position, GlobalEnum.LocalizationTerms.reasonCantAttack_AP.ToString());
+            return;
+        }
+
+        if (CurrentActionRoutine == null)
+            CurrentActionRoutine = StartCoroutine(TakeSitPositionRotuine(on_finish));
+
+        m_currentStateAction = CurrentActionState.gettingAmbush;
+        AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundAction);
+        IEnumerator TakeSitPositionRotuine(Action on_finish)
+        {
+            bool isTakingSit = false;
+            if (!IsPersonAtCover)
+            {
+                isTakingSit = true;
+                m_person_view.OnGetCover(() => isTakingSit = false);
+            }
+
+            while (isTakingSit)
+            {
+                yield return null;
+            }
+            PersonInAmbushMode = true;
+            current_AP -= current_AP;
+            onAmbush?.Invoke();
+            on_finish?.Invoke();
+            StaticHelper.RestartCoroutine(ref ambushRoutine, this, AmbushProcessing());
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+        }
+    }
+
+    public IEnumerator AmbushProcessing()
+    {
+        int currentTurn = m_battle_system_controller.CurrentBattleTurn.currentQueuTurnsNumber;
+    
+        while (PersonInAmbushMode && IsPersonInBattle)
+        {
+            if((m_battle_system_controller.CurrentBattleTurn.currentQueuTurnsNumber - currentTurn == BattleCalculating.m_AmbushDurationTurns && m_battle_system_controller.CurrentBattleTurn.m_owner_turn == this))
+            {
+                Debug.Log($"{m_battle_system_controller.CurrentBattleTurn.currentQueuTurnsNumber}   {currentTurn}   {m_battle_system_controller.CurrentBattleTurn.currentQueuTurnsNumber - currentTurn }   {BattleCalculating.m_AmbushDurationTurns}   { m_battle_system_controller.CurrentBattleTurn.m_owner_turn}   {m_battle_system_controller.CurrentBattleTurn.m_owner_turn == this}");
+                PersonInAmbushMode = false;
+                yield break;
+            }
+            //Debug.Log($"{currentTurn} {m_battle_system_controller.CurrentBattleTurn.currentQueuTurnsNumber}");
+            if (m_battle_system_controller.CurrentOwnerTurn.m_currentStateAction == CurrentActionState.move &&
+                m_battle_system_controller.CurrentOwnerTurn.m_currentNumberGroupTeams != m_currentNumberGroupTeams 
+                && BattleCalculating.GetDistanceAttackInMetres(CurrentWeaponData.m_distance_attack) >= Vector3.Distance(Position, m_battle_system_controller.CurrentOwnerTurn.Position)
+                && StatusPerson != GlobalEnum.PersonStatus.dead)
+            {
+                Debug.Log($"AMBUSH {m_battle_system_controller.CurrentOwnerTurn.m_uniq_id} {m_battle_system_controller.CurrentOwnerTurn.m_currentStateAction} ");
+                onAmbushTriggered?.Invoke(this, m_battle_system_controller.CurrentOwnerTurn);
+                yield break;
+            }
+            yield return null;
+        }
+        PersonInAmbushMode = false;
+        yield return null;
+    }
+
+    public void SyncTakeObject(Action on_finish = null,bool withAnimation = true)
+    {
+        if (CurrentActionRoutine == null)
+            CurrentActionRoutine = StartCoroutine(TakeObject(on_finish));
+        m_currentStateAction = CurrentActionState.takingObject;
+    
+        IEnumerator TakeObject(Action on_finish)
+        {
+            // call animation
+            yield return new WaitForSeconds(0.1f);
+            if(withAnimation)
+            {
+                bool isTakingFinish = false;
+                m_person_view.OnTakeObjectLow(() => isTakingFinish = true);
+                while (!isTakingFinish)
+                {
+                    yield return null;
+                }
+                AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundPickUp);
+            }
+       
+            on_finish?.Invoke();
+            m_currentStateAction = CurrentActionState.idle;
+            CurrentActionRoutine = null;
+        }
+    }
+
+    public IEnumerator SyncRotationCharacter(Vector3 pointToRotate,float time = 1f, float delay = 0f)
+    {
+        yield return new WaitForSeconds(delay);
+        float timer_rotation = 0;
+        float fraction_rotation = 0;
+        Vector3 direction_to_target = pointToRotate - Position;
+        Quaternion rotation = Quaternion.LookRotation(direction_to_target);
+        while (fraction_rotation < 1)
+        {
+            timer_rotation += Time.deltaTime;
+            fraction_rotation = Mathf.Clamp01(timer_rotation / time);
+            Rotation = Quaternion.Lerp(Rotation, rotation, fraction_rotation);
+            yield return null;
+        }
+    }
+    public IEnumerator SyncRotationCharacter(Quaternion newRotation)
+    {
+        float timer_rotation = 0;
+        float fraction_rotation = 0;
+        while (fraction_rotation < 1)
+        {
+            timer_rotation += Time.deltaTime;
+            fraction_rotation = Mathf.Clamp01(timer_rotation / 1f);
+            Rotation = Quaternion.Lerp(Rotation, newRotation, fraction_rotation);
+            yield return null;
+        }
+    }
+
+    public void OnDeath(bool deadAtLoad = false)
+    {
+        m_status = GlobalEnum.PersonStatus.dead;
+        m_person_view.PauseAnimator(false);
+        AudioManager.Instance.PlaySound(GlobalEnum.AudioClips.soundDeath);
+        if (CurrentActionRoutine !=null)
+        {
+            StopCoroutine(CurrentActionRoutine);
+            CurrentActionRoutine = null;
+        }
+        EnableCastCollisions(false);
+        MainWeaponItem.hideInInventoryView = false;
+        SecondaryWeapon.hideInInventoryView = false;
+        if(m_InventoryBag.GetItems().Count >0)
+        m_deadBody.SwitchView(true);
+
+        m_InventoryBag.onBagEmpty += () => m_deadBody.SwitchView(false);
+        if(deadAtLoad)
+        {
+            m_nav_mesh_move_controller.enabled = false;
+            m_person_view.OnDeath(null, 1, true);
+        }
+        else
+        {
+            m_person_view.OnDeath(() =>
+            {
+                    m_nav_mesh_move_controller.SetFollowNavmeshAgent = false;
+            });
+        }
+    }
+
+    public void Revive(Action onFinish = null, float percentageHP = 0.2f)
+    {
+        m_deadBody.SwitchView(false);
+        MainWeaponItem.hideInInventoryView = true;
+        SecondaryWeapon.hideInInventoryView = true;
+        m_person_view.OnRevive(() =>
+        {
+            m_nav_mesh_move_controller.SetFollowNavmeshAgent = true;
+            current_HP = BattleCalculating.RoundToInt(m_base_battle_data.MaxHP * percentageHP);
+            m_status = GlobalEnum.PersonStatus.alive;
+            EnableCastCollisions(true);
+            onFinish?.Invoke();
+        });
+    }
+
+    public Vector3[] CalculatePath(Vector3 target_position, Vector3 start_position)
+    {
+        if (m_nav_mesh_move_controller)
+        {
+            return m_nav_mesh_move_controller.CalculatePath(target_position, start_position);
+        }
+        else return null;
+    }
+
+    public void EnableCastCollisions(bool value)
+    {
+        collider_caster.enabled = value;
+    }
+    
+    public bool CheckEquipmentForAttack(out int ammo_count)
+    {
+        ammo_count = 0;
+        switch (m_InventoryBag.MainWeapon.m_data.m_type_weapon)
+        {
+            case WeaponsParametres.TypeWeapon.melee:
+                return true;
+            case WeaponsParametres.TypeWeapon.range:
+                ItemInventory ammo = m_InventoryBag.GetAmmoForWeapon(m_InventoryBag.MainWeapon);
+                ammo_count = ammo != null ? ammo.Count : 0;
+                return m_InventoryBag.MainWeapon.current_magazine_count > 0;
+        }
+        return false;
+    }
+
+    public bool CheckFullMagazine(out bool isWeaponWithoutReload)
+    {
+        isWeaponWithoutReload = m_InventoryBag.MainWeapon.m_data.m_type_weapon == WeaponsParametres.TypeWeapon.melee;
+        return m_InventoryBag.MainWeapon.current_magazine_count == m_InventoryBag.MainWeapon.m_data.m_magazine_count;
+    }
+
+    public void SetPauseAnimator(bool onPause)
+    {
+        m_person_view.PauseAnimator(onPause);
+    }
+
+    public void ClearChanceVariableEvents()
+    {
+        onTakingSit = null;
+        onCriticalStrikeMode = null;
+    }
+
+    public void SwitchVisible(bool status)
+    {
+        m_person_view.SwitchView(status,true);
+    }
+
+
+    public abstract void SetDestinationToMove(Vector3 position, Action on_finish);
+    public abstract void StopMovement();
+
+    public abstract void SetRateMovement(NavMeshMovement.RateMovemnt rateMovement);
+    public abstract void OnGroundClick(BaseEventData data);
+
+    public abstract void OnChangeMode(GlobalEnum.SceneGamePlayeMode mode);
+
+    public abstract Dictionary<string, ItemInventory> BagItems { get; }
+
+
+}
